@@ -1,0 +1,32 @@
+{
+  "task_id": "test_overlay_clone_001",
+  "task_text": "Test that dependent subtasks inherit predecessor VM state via overlay cloning. Task A opens Wikipedia, Task B (which depends on A) should see Wikipedia already open and describe what it sees.",
+  "dependency_graph": {
+    "task_analysis": "Two-task linear dependency to test apptainer overlay cloning. Task A modifies VM state by navigating to a website. Task B should inherit that state.",
+    "subtasks": [
+      {
+        "id": "open_wikipedia",
+        "agent_type": "cua",
+        "description": "Open the Wikipedia main page in the browser",
+        "dependencies": [],
+        "instruction": "Open Firefox or the default web browser. Navigate to https://en.wikipedia.org/wiki/Main_Page and wait for the page to fully load. Once you can see the Wikipedia main page with its logo and 'Welcome to Wikipedia' text, terminate with success. Do NOT close the browser.",
+        "outputs": ["wikipedia_page_loaded"]
+      },
+      {
+        "id": "verify_wikipedia",
+        "agent_type": "cua",
+        "description": "Verify that Wikipedia is already open from the predecessor task",
+        "dependencies": ["open_wikipedia"],
+        "instruction": "Look at the screen. You should see a web browser with Wikipedia already open (from a previous task). Describe exactly what you see on screen — especially the URL in the address bar and the page content. If Wikipedia is visible, report success. If you see a blank desktop or empty browser, report that the state was NOT inherited. Terminate after describing what you see.",
+        "outputs": ["screen_description", "state_inherited"]
+      }
+    ],
+    "aggregation": {
+      "id": "check_result",
+      "agent_type": "manager",
+      "description": "Report whether overlay cloning preserved VM state",
+      "dependencies": ["open_wikipedia", "verify_wikipedia"],
+      "instruction": "Based on the verify_wikipedia result, determine if the dependent task successfully inherited the predecessor's VM state (Wikipedia should have been visible). Report pass or fail."
+    }
+  }
+}

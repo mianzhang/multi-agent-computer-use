@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__TITLE__</title>
+  <meta name="description" content="MACU run visualizer" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- CSS is inlined so the page renders identically whether you open it
+       via http:// or directly via file://. Browsers block XHR to local
+       files (which is how Babel loads external <script src="..."> tags),
+       so JS is inlined too — see below. -->
+  <style>
+__CSS__
+  </style>
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script>
+    window.__MACU_DATA__ = __DATA_JSON__;
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+__GRAPH_JS__
+  </script>
+  <script type="text/babel" data-type="module">
+__EXAMPLE_JS__
+  </script>
+  <script type="text/babel" data-type="module">
+__APP_JS__
+  </script>
+</body>
+</html>

@@ -1,0 +1,159 @@
+/* Standalone MACU run visualizer.
+ *
+ * Reads the run data from window.__MACU_DATA__ (inlined into index.html
+ * so the page opens via file:// without needing a local web server) and
+ * mounts the ExamplePlayer from example.js.
+ */
+
+const { useEffect, useState } = React;
+
+// Markdown-ish renderer for the aggregator's final response. Mirrors the
+// subset used by the website (headings, bold, tables, ordered/unordered
+// lists). Exposed as window.renderFinalResponse so example.js can reuse it.
+function renderFinalResponse(text) {
+  if (!text) return null;
+  const lines = text.split('\n');
+  const out = [];
+  let i = 0;
+  let key = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const h2 = line.match(/^##\s+(.*)$/);
+    if (h2) {
+      out.push(<h2 key={key++}>{processInline(h2[1])}</h2>);
+      i++;
+      continue;
+    }
+    if (line.startsWith('|') && i + 1 < lines.length && /^\|[\s\-:|]+\|$/.test(lines[i + 1])) {
+      const header = line.split('|').slice(1, -1).map(s => s.trim());
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].startsWith('|')) {
+        rows.push(lines[i].split('|').slice(1, -1).map(s => s.trim()));
+        i++;
+      }
+      out.push(
+        <table key={key++}>
+          <thead>
+            <tr>{header.map((h, idx) => <th key={idx}>{processInline(h)}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((r, ri) => (
+              <tr key={ri}>{r.map((c, ci) => <td key={ci}>{processInline(c)}</td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      );
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*]\s+/, ''));
+        i++;
+      }
+      out.push(
+        <ul key={key++} style={{ paddingLeft: 22, margin: '6px 0 12px' }}>
+          {items.map((it, idx) => <li key={idx}>{processInline(it)}</li>)}
+        </ul>
+      );
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ''));
+        i++;
+      }
+      out.push(
+        <ol key={key++} style={{ paddingLeft: 22, margin: '6px 0 12px' }}>
+          {items.map((it, idx) => <li key={idx}>{processInline(it)}</li>)}
+        </ol>
+      );
+      continue;
+    }
+    if (line.trim() === '') { i++; continue; }
+    const buf = [line];
+    i++;
+    while (i < lines.length && lines[i].trim() && !/^[#|]|^\d+\.\s+|^[-*]\s+/.test(lines[i])) {
+      buf.push(lines[i]);
+      i++;
+    }
+    out.push(<p key={key++} style={{ margin: '6px 0' }}>{processInline(buf.join(' '))}</p>);
+  }
+  return out;
+}
+
+function processInline(s) {
+  const parts = [];
+  const re = /\*\*([^*]+)\*\*/g;
+  let last = 0, m;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) parts.push(s.slice(last, m.index));
+    parts.push(<strong key={parts.length}>{m[1]}</strong>);
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) parts.push(s.slice(last));
+  return parts.length ? parts : s;
+}
+
+window.renderFinalResponse = renderFinalResponse;
+
+function fmtSeconds(s) {
+  if (s == null) return '—';
+  const total = Math.round(s);
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+  }
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function StandaloneApp() {
+  const data = window.__MACU_DATA__;
+  if (!data) {
+    return <div className="run-empty">No run data found. Re-run <code>visualize_run.py</code>.</div>;
+  }
+  const subagentCount = (data.subtask_order || []).length;
+  const replanCount = Math.max(0, (data.snapshots || []).length - 1);
+  const wallclock = data.wallclock_total_seconds ?? data.total_seconds;
+  const cost = data.total_cost_usd;
+  return (
+    <>
+      <header className="run-header">
+        <div className="container">
+          <div className="run-header__eyebrow">MACU run · {data.task_id}</div>
+          <h1 className="run-header__title">{data.task_text || data.task_id}</h1>
+          <div className="run-header__meta">
+            <span><strong>{fmtSeconds(wallclock)}</strong> wall clock</span>
+            <span>·</span>
+            <span><strong>{subagentCount}</strong> subagents</span>
+            <span>·</span>
+            <span><strong>{replanCount}</strong> replans</span>
+            {cost != null && (
+              <>
+                <span>·</span>
+                <span><strong>${cost.toFixed(2)}</strong> total cost</span>
+              </>
+            )}
+          </div>
+        </div>
+      </header>
+      <main className="run-main">
+        <div className="container">
+          <window.ExamplePlayer data={data} />
+        </div>
+      </main>
+      <footer className="run-footer">
+        <div className="container">
+          Generated by <code>visualize_run.py</code> from <code>{data.source_run_dir || data.task_id}</code>
+        </div>
+      </footer>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<StandaloneApp />);

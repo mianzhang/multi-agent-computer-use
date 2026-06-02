@@ -1,0 +1,13 @@
+# Base MACU dependencies pinned from `.venv` via `uv pip freeze`.
+# OSWorld, local OSWORLD_ROOT checkouts, and CUA environment packages are
+# installed separately as described in README.md.
+openai==2.24.0
+anthropic==0.92.0
+google-genai==1.73.1
+pyyaml==6.0.3
+tqdm==4.67.3
+filelock==3.25.2
+python-dotenv==1.2.2
+flask==3.0.3
+networkx==3.6.1
+pillow==11.0.0

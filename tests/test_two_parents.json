@@ -1,0 +1,40 @@
+{
+  "task_id": "test_two_parents",
+  "task_text": "Find the population of Tokyo and the population of New York City, then compare which city has a larger population and by how much.",
+  "dependency_graph": {
+    "task_analysis": "Two independent data-collection subtasks (Tokyo population, NYC population) feed into a comparison subtask that needs both results.",
+    "subtasks": [
+      {
+        "id": "tokyo_pop",
+        "agent_type": "cua",
+        "description": "Look up Tokyo's population",
+        "dependencies": [],
+        "instruction": "Go to Google and search for the current population of Tokyo. Report the population figure you find.",
+        "outputs": ["tokyo_population_figure"]
+      },
+      {
+        "id": "nyc_pop",
+        "agent_type": "cua",
+        "description": "Look up New York City's population",
+        "dependencies": [],
+        "instruction": "Go to Google and search for the current population of New York City. Report the population figure you find.",
+        "outputs": ["nyc_population_figure"]
+      },
+      {
+        "id": "compare_populations",
+        "agent_type": "cua",
+        "description": "Compare the two cities' populations",
+        "dependencies": ["tokyo_pop", "nyc_pop"],
+        "instruction": "Compare the populations of Tokyo and New York City and determine which city is larger and by how much.",
+        "outputs": ["comparison_result"]
+      }
+    ],
+    "aggregation": {
+      "id": "final_aggregation",
+      "agent_type": "manager",
+      "description": "Compile the population comparison summary",
+      "dependencies": ["tokyo_pop", "nyc_pop", "compare_populations"],
+      "instruction": "Summarize the population comparison between Tokyo and New York City, including exact figures and the difference."
+    }
+  }
+}

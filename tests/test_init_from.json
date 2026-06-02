@@ -1,0 +1,33 @@
+{
+  "task_id": "test_init_from_001",
+  "task_text": "Test that init_from correctly restores a predecessor's final VM state. Task A opens Wikipedia and types a search query. Task B (with init_from pointing at A) should see Wikipedia already open with the search text and complete the search.",
+  "dependency_graph": {
+    "task_analysis": "Two-task chain where task B uses init_from to resume from task A's final state, verifying that the post-run VM snapshot (overlay + vmstate) is correctly cloned and restored.",
+    "subtasks": [
+      {
+        "id": "open_and_search",
+        "agent_type": "cua",
+        "description": "Open browser and type a search query on Wikipedia",
+        "dependencies": [],
+        "instruction": "Open Firefox or the default web browser. Navigate to https://en.wikipedia.org/wiki/Main_Page and wait for the page to fully load. Once you can see the Wikipedia main page with its logo and 'Welcome to Wikipedia' text, type 'Artificial intelligence' into the Wikipedia search box but do NOT press Enter or click the search button. Leave the browser open with the text visible in the search box. Once you can see the typed text, terminate with success. Do NOT close the browser.",
+        "outputs": ["search_text_entered"]
+      },
+      {
+        "id": "continue_search",
+        "agent_type": "cua",
+        "description": "Continue from prior task's state and complete the search",
+        "dependencies": ["open_and_search"],
+        "instruction": "Look at the screen. You should see a web browser with Wikipedia already open and 'Artificial intelligence' already typed in the search box (this was done by a previous task whose VM state you inherited). Verify you can see this text in the search box, then press Enter to execute the search. Wait for the search results or article page to load. Describe exactly what you see on screen — especially the URL in the address bar and the page content. If the search box is empty or Wikipedia is not open, report that the init_from state was NOT inherited. Terminate after describing what you see.",
+        "outputs": ["search_results_description", "state_inherited"],
+        "init_from": "open_and_search"
+      }
+    ],
+    "aggregation": {
+      "id": "final_aggregation",
+      "agent_type": "manager",
+      "description": "Report whether init_from preserved VM state",
+      "dependencies": ["open_and_search", "continue_search"],
+      "instruction": "Based on the continue_search subtask's result, determine if the init_from mechanism successfully preserved the predecessor's final VM state. Specifically: (1) Was Wikipedia already open when continue_search started? (2) Was 'Artificial intelligence' already typed in the search box? (3) Was the search successfully completed? Report pass or fail with details."
+    }
+  }
+}
