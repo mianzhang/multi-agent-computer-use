@@ -307,6 +307,17 @@ def build_html(task_dir: Path) -> str:
     status = node_status_map(fr)
     responses = node_response_map(fr)
 
+    # Discover per-subtask screen recordings (OSWorld writes one recording.mp4
+    # per executed subtask). Map subtask_id -> path relative to task_dir so the
+    # inlined <video> works from file:// next to analysis.html.
+    recordings: dict[str, str] = {}
+    for rec in task_dir.glob("*/results/**/recording.mp4"):
+        sid = rec.relative_to(task_dir).parts[0]
+        # keep the largest (most complete) if duplicates exist for a subtask
+        rel = str(rec.relative_to(task_dir))
+        if sid not in recordings or rec.stat().st_size > (task_dir / recordings[sid]).stat().st_size:
+            recordings[sid] = rel
+
     # Build a compact per-snapshot payload for the JS renderer.
     frames = []
     for snap in snapshots:
@@ -341,6 +352,7 @@ def build_html(task_dir: Path) -> str:
         "final_response": (fr or {}).get("final_response", ""),
         "status": status,
         "responses": {k: (v or "")[:240] for k, v in responses.items()},
+        "recordings": recordings,
         "frames": frames,
         "replans": replans,
     }
@@ -386,6 +398,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   h3{font-size:13px;margin:14px 0 6px;color:#7fd0ff;border-bottom:1px solid #2a3441;padding-bottom:4px;}
   .resp{white-space:pre-wrap;color:#cdd6df;font-size:12px;background:#10161e;padding:8px;border-radius:5px;}
   .instr{white-space:pre-wrap;color:#bcc7d2;font-size:11.5px;background:#10161e;padding:7px;border-radius:5px;margin-top:3px;line-height:1.45;}
+  .rec{width:100%;border-radius:5px;margin-top:4px;background:#000;}
 </style></head>
 <body>
 <header>
@@ -551,6 +564,11 @@ function renderSide(idx){
     if(n.instr){
       h+=`<details style="margin:2px 0 6px 14px"><summary style="cursor:pointer;color:#7fd0ff;font-size:12px">full instruction</summary>`+
          `<div class="instr">${esc(n.instr)}</div></details>`;
+    }
+    const rec=DATA.recordings[n.id];
+    if(rec){
+      h+=`<details style="margin:2px 0 8px 14px" open><summary style="cursor:pointer;color:#7fd0ff;font-size:12px">screen recording</summary>`+
+         `<video class="rec" controls preload="metadata" src="${esc(rec)}"></video></details>`;
     }
   });
   if(idx===DATA.frames.length-1 && DATA.final_response){
