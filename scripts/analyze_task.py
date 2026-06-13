@@ -209,7 +209,10 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
         for n in cua0:
             deps = n.get("dependencies") or []
             dep_s = f" ← depends on {deps}" if deps else " (no deps, can start immediately)"
-            print(f"     • {_c(n['id'], 'blue', use_color)}: {_trunc(n.get('description',''), 70)}{dep_s}")
+            print(f"     • {_c(n['id'], 'blue', use_color)}: {n.get('description','')}{dep_s}")
+            instr = n.get("instruction")
+            if instr:
+                print(f"       {_c('instruction:', 'dim', use_color)} {_wrap(instr, indent='         ')}")
         agg = init.get("aggregation", {})
         if agg:
             print(f"     ⊕ {_c(agg.get('id','final_aggregation'), 'mag', use_color)} "
@@ -254,13 +257,16 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
                 for it_obj in items:
                     if isinstance(it_obj, dict):
                         nid = it_obj.get("id", "?")
-                        desc = _trunc(it_obj.get("description", ""), 70)
+                        desc = it_obj.get("description", "")
                         extra = ""
                         if it_obj.get("variant_of"):
                             extra = f" (variant of {it_obj['variant_of']})"
                         label = "add (retry of " + str(trig) + ")" if op_name == "add" else op_name
                         print(f"      {_c(sym + ' ' + label, col, use_color)} "
                               f"{_c(nid, 'blue', use_color)}: {desc}{extra}")
+                        instr = it_obj.get("instruction")
+                        if op_name == "add" and instr:
+                            print(f"        {_c('instruction:', 'dim', use_color)} {_wrap(instr, indent='          ')}")
                     else:
                         print(f"      {_c(sym + ' ' + op_name, col, use_color)} {it_obj}")
             mod = dec.get("modify") or {}
@@ -310,6 +316,7 @@ def build_html(task_dir: Path) -> str:
             nodes.append({
                 "id": st["id"], "kind": "cua",
                 "desc": st.get("description", ""),
+                "instr": st.get("instruction", ""),
                 "deps": st.get("dependencies", []) or [],
                 "variant_of": st.get("variant_of"),
             })
@@ -318,6 +325,7 @@ def build_html(task_dir: Path) -> str:
             nodes.append({
                 "id": agg["id"], "kind": "manager",
                 "desc": agg.get("description", ""),
+                "instr": agg.get("instruction", ""),
                 "deps": agg.get("dependencies", []) or [],
             })
         frames.append({
@@ -377,6 +385,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle;}
   h3{font-size:13px;margin:14px 0 6px;color:#7fd0ff;border-bottom:1px solid #2a3441;padding-bottom:4px;}
   .resp{white-space:pre-wrap;color:#cdd6df;font-size:12px;background:#10161e;padding:8px;border-radius:5px;}
+  .instr{white-space:pre-wrap;color:#bcc7d2;font-size:11.5px;background:#10161e;padding:7px;border-radius:5px;margin-top:3px;line-height:1.45;}
 </style></head>
 <body>
 <header>
@@ -521,14 +530,19 @@ function renderSide(idx){
       h+=`<div class="op op-mod">~ modify <b>${esc(nid)}</b>: ${parts.join(', ')}</div>`;
     });
   }
-  // node list with statuses
+  // node list with statuses + FULL instruction (not truncated) per node
   h+=`<h3>Nodes in this frame</h3>`;
   frame.nodes.forEach(n=>{
     const s=DATA.status[n.id]||'—';
     const col=s==='success'?'#7ee2a8':(s==='error'?'#ffa0b0':'#9aa7b5');
-    h+=`<div style="margin:3px 0"><span class="dot" style="background:${statusColor(n.id)}"></span>`+
+    h+=`<div style="margin:6px 0 2px"><span class="dot" style="background:${statusColor(n.id)}"></span>`+
        `<b>${esc(n.id)}</b> <span style="color:${col}">[${esc(s)}]</span>`+
        (n.deps.length?` <span style="color:#7a8694">← ${n.deps.map(esc).join(', ')}</span>`:'')+`</div>`;
+    if(n.desc) h+=`<div style="color:#9aa7b5;font-size:12px;margin-left:14px">${esc(n.desc)}</div>`;
+    if(n.instr){
+      h+=`<details style="margin:2px 0 6px 14px"><summary style="cursor:pointer;color:#7fd0ff;font-size:12px">full instruction</summary>`+
+         `<div class="instr">${esc(n.instr)}</div></details>`;
+    }
   });
   if(idx===DATA.frames.length-1 && DATA.final_response){
     h+=`<h3>Final response</h3><div class="resp">${esc(DATA.final_response)}</div>`;
