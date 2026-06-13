@@ -16,3 +16,9 @@ data/
 .vmware_vms
 
 .git.old
+
+# Apptainer/QEMU artifacts: SIF image, base qcow2, per-run overlays/vmstate,
+# downloaded setup cache. These are multi-GB generated/downloaded data.
+apptainer/
+osworld_vms/
+cache/

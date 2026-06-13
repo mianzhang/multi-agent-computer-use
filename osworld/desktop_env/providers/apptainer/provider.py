@@ -531,13 +531,24 @@ class ApptainerProvider(Provider):
             f"{self.instance_dir}:{self.instance_dir}",
             f"{os.path.dirname(self.boot_overlay)}:{os.path.dirname(self.boot_overlay)}",
         ]
-        # If the overlay backs a base image in a different dir, bind that too.
+        # Bind EVERY directory in the qcow2 backing chain, not just one level.
+        # The chain can be multi-level (working overlay -> scout overlay ->
+        # Ubuntu.qcow2 base, each possibly in a different dir), and qemu must be
+        # able to open every file in it. Binding only one level breaks deeper
+        # chains (e.g. the base image dir osworld_vms goes unmounted).
         try:
-            base_dir = self._overlay_backing_dir(self.boot_overlay)
-            if base_dir:
-                binds.append(f"{base_dir}:{base_dir}")
+            chain_path = self.boot_overlay
+            for _ in range(10):
+                backing = self._get_backing_file(chain_path)
+                if not backing:
+                    break
+                bdir = os.path.dirname(os.path.abspath(backing))
+                bind_entry = f"{bdir}:{bdir}"
+                if bind_entry not in binds:
+                    binds.append(bind_entry)
+                chain_path = backing
         except Exception as exc:
-            logger.warning("Could not determine overlay backing dir: %s", exc)
+            logger.warning("Could not walk overlay backing chain: %s", exc)
         # Bind the vmstate file directory for incoming migration.
         if incoming_state:
             incoming_dir = os.path.dirname(os.path.abspath(incoming_state))
@@ -550,7 +561,11 @@ class ApptainerProvider(Provider):
             "--cleanenv",
             "--no-home",
         ]
+        seen_binds: set = set()
         for b in binds:
+            if b in seen_binds:
+                continue
+            seen_binds.add(b)
             cmd.extend(["--bind", b])
         cmd.append(self.sif_path)
         cmd.extend(qemu_argv)
