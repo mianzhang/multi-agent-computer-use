@@ -377,9 +377,17 @@ def _delete_vm_tree(vm_path: Optional[str], label: str) -> bool:
         if resolved.is_file():
             try:
                 resolved.unlink()
-                sidecar = Path(str(resolved) + ".conn.json")
-                if sidecar.exists():
-                    sidecar.unlink()
+                # Delete companion sidecars too. The .vmstate file is a ~4GB
+                # RAM snapshot; not deleting it leaks ~4GB per cleaned overlay
+                # and fills the disk over a batch run. Safe to delete here:
+                # cleanup runs at task teardown in leaf-first topological order
+                # (an overlay is only removed once all overlays backing onto it
+                # are gone), so no init_from successor can still need this
+                # overlay's vmstate by the time the overlay itself is deleted.
+                for suffix in (".conn.json", ".vmstate"):
+                    sidecar = Path(str(resolved) + suffix)
+                    if sidecar.exists():
+                        sidecar.unlink()
                 logger.info("[%s] Deleted overlay file %s", label, resolved)
                 return True
             except Exception as exc:  # noqa: BLE001
