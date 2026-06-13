@@ -111,6 +111,18 @@ def node_status_map(final_results: Optional[dict]) -> dict[str, str]:
     return out
 
 
+def node_response_map(final_results: Optional[dict]) -> dict[str, str]:
+    """id -> the subtask's self-reported response/error (the proximate cause
+    that the manager reacted to when it decided to spawn a retry)."""
+    out: dict[str, str] = {}
+    if not final_results:
+        return out
+    for sid, info in (final_results.get("subtask_results") or {}).items():
+        if isinstance(info, dict):
+            out[sid] = info.get("response", "") or ""
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Terminal report
 # --------------------------------------------------------------------------- #
@@ -132,12 +144,21 @@ def _trunc(s: str, n: int = 90) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _wrap(s: str, width: int = 88, indent: str = "        ") -> str:
+    """Word-wrap text to width with a hanging indent (for full reasoning)."""
+    import textwrap
+    s = " ".join(str(s).split())
+    lines = textwrap.wrap(s, width=width) or [""]
+    return ("\n" + indent).join(lines)
+
+
 def print_report(task_dir: Path, use_color: bool = True) -> None:
     fr = _load_json(task_dir / "final_results.json")
     summary = _load_json(task_dir / "summary.json")
     snapshots = load_snapshots(task_dir)
     replans = _load_jsonl(task_dir / "replan_log.jsonl")
     status = node_status_map(fr)
+    responses = node_response_map(fr)
 
     def h(s):  # header
         return _c(s, "bold", use_color)
@@ -207,15 +228,25 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
                    else _c("no change", "dim", use_color))
             print(f"\n   {_c(f'replan #{it}', 'yellow', use_color)} "
                   f"[trigger: {trig}, {reason}] → {tag}")
+            # WHY (1): the proximate cause — what the triggering subtask reported
+            # back, which is what the manager reacted to.
+            if trig and trig in responses:
+                tstat = status.get(trig, "?")
+                tcol = "green" if tstat == "success" else ("red" if tstat == "error" else "dim")
+                resp = responses.get(trig, "")
+                print(f"      trigger outcome: [{_c(tstat, tcol, use_color)}] "
+                      f"{_trunc(resp, 100)}")
             dec = r.get("decision")
             if not applied or not dec:
                 if dec and dec.get("reasoning"):
-                    print(f"      reasoning: {_trunc(dec['reasoning'], 110)}")
+                    print(f"      manager reasoning: {_wrap(dec['reasoning'])}")
                 else:
-                    print(f"      {_c('(manager decided the graph was fine as-is)', 'dim', use_color)}")
+                    print(f"      {_c('(manager decided the graph was fine as-is — no retry needed)', 'dim', use_color)}")
                 continue
+            # WHY (2): the manager's full deliberation — why a retry, and what's
+            # different about it. Shown in full (not truncated).
             if dec.get("reasoning"):
-                print(f"      reasoning: {_trunc(dec['reasoning'], 110)}")
+                print(f"      manager reasoning: {_wrap(dec['reasoning'])}")
             # the four graph ops
             for op_name, col, sym in (("add", "green", "+"), ("remove", "red", "−"),
                                        ("cancel", "red", "✗")):
@@ -223,11 +254,12 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
                 for it_obj in items:
                     if isinstance(it_obj, dict):
                         nid = it_obj.get("id", "?")
-                        desc = _trunc(it_obj.get("description", ""), 60)
+                        desc = _trunc(it_obj.get("description", ""), 70)
                         extra = ""
                         if it_obj.get("variant_of"):
                             extra = f" (variant of {it_obj['variant_of']})"
-                        print(f"      {_c(sym + ' ' + op_name, col, use_color)} "
+                        label = "add (retry of " + str(trig) + ")" if op_name == "add" else op_name
+                        print(f"      {_c(sym + ' ' + label, col, use_color)} "
                               f"{_c(nid, 'blue', use_color)}: {desc}{extra}")
                     else:
                         print(f"      {_c(sym + ' ' + op_name, col, use_color)} {it_obj}")
@@ -267,6 +299,7 @@ def build_html(task_dir: Path) -> str:
     snapshots = load_snapshots(task_dir)
     replans = _load_jsonl(task_dir / "replan_log.jsonl")
     status = node_status_map(fr)
+    responses = node_response_map(fr)
 
     # Build a compact per-snapshot payload for the JS renderer.
     frames = []
@@ -299,6 +332,7 @@ def build_html(task_dir: Path) -> str:
         "score": (fr or {}).get("osworld_evaluator_score"),
         "final_response": (fr or {}).get("final_response", ""),
         "status": status,
+        "responses": {k: (v or "")[:240] for k, v in responses.items()},
         "frames": frames,
         "replans": replans,
     }
@@ -467,8 +501,17 @@ function renderSide(idx){
     const r=applied[idx-1];
     const d=r.decision;
     h+=`<div class="reason">replan #${r.iteration} · trigger: ${esc(r.trigger_sid)} · ${esc(r.reason)}</div>`;
-    if(d.reasoning) h+=`<div class="reason">“${esc(trunc(d.reasoning,260))}”</div>`;
-    (d.add||[]).forEach(a=>{h+=`<div class="op op-add">+ add <b>${esc(a.id)}</b>${a.variant_of?` (variant of ${esc(a.variant_of)})`:''}<br>${esc(trunc(a.description,80))}</div>`;});
+    // WHY (1): what the triggering subtask reported (the proximate cause)
+    const tstat=DATA.status[r.trigger_sid]||'?';
+    const tresp=DATA.responses[r.trigger_sid]||'';
+    if(tresp){
+      const tcol=tstat==='success'?'#7ee2a8':(tstat==='error'?'#ffa0b0':'#9aa7b5');
+      h+=`<div class="op op-rm"><b>why:</b> trigger <b>${esc(r.trigger_sid)}</b> `+
+         `→ <span style="color:${tcol}">[${esc(tstat)}]</span> ${esc(trunc(tresp,140))}</div>`;
+    }
+    // WHY (2): manager's full reasoning (no truncation)
+    if(d.reasoning) h+=`<div class="reason"><b>manager reasoning:</b> “${esc(d.reasoning)}”</div>`;
+    (d.add||[]).forEach(a=>{h+=`<div class="op op-add">+ add <b>${esc(a.id)}</b> <span style="color:#9aa7b5">(retry of ${esc(r.trigger_sid)})</span>${a.variant_of?` (variant of ${esc(a.variant_of)})`:''}<br>${esc(trunc(a.description,90))}</div>`;});
     (d.remove||[]).forEach(x=>{h+=`<div class="op op-rm">− remove <b>${esc(typeof x==='object'?x.id:x)}</b></div>`;});
     (d.cancel||[]).forEach(x=>{h+=`<div class="op op-rm">✗ cancel <b>${esc(typeof x==='object'?x.id:x)}</b></div>`;});
     Object.entries(d.modify||{}).forEach(([nid,ch])=>{
