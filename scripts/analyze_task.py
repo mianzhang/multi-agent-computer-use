@@ -401,6 +401,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span><span class="dot" style="background:#b86fd4"></span>Manager/aggregation</span>
     <span><span class="dot" style="background:#3fbf6f"></span>success</span>
     <span><span class="dot" style="background:#d45a6a"></span>error</span>
+    <span><span class="dot" style="background:#c9a227"></span>pending (not run yet)</span>
     <span><span class="dot" style="background:#7a8694"></span>not-run/unknown</span>
   </span>
 </div>
@@ -441,14 +442,22 @@ function layout(nodes){
   return {depth,layers};
 }
 
-function statusColor(id){
-  const s=DATA.status[id];
+// Frame-aware status. The aggregation (manager) node only executes at the very
+// end, so it must NOT show its final 'success' in intermediate frames — it is
+// 'pending' until the last frame.
+function effStatus(node, idx){
+  const isLast = (idx === DATA.frames.length - 1);
+  if(node.kind==='manager' && !isLast) return 'pending';
+  return DATA.status[node.id] || 'unknown';
+}
+function colorOf(s){
   if(s==='success') return '#3fbf6f';
   if(s==='error') return '#d45a6a';
-  return '#7a8694';
+  if(s==='pending') return '#c9a227';   // amber = not run yet
+  return '#7a8694';                       // unknown / not-run
 }
 
-function renderGraph(frame){
+function renderGraph(frame, idx){
   const nodes=frame.nodes;
   const {depth,layers}=layout(nodes);
   const colW=260, rowH=92, padX=30, padY=30, boxW=210, boxH=64;
@@ -473,7 +482,7 @@ function renderGraph(frame){
     const p=pos[n.id]; const isCua=n.kind==='cua';
     const fill=isCua?'#1d2b3d':'#2e1d3d';
     const stroke=isCua?'#4a90d9':'#b86fd4';
-    const sc=statusColor(n.id);
+    const sc=colorOf(effStatus(n, idx));
     boxes+=`<g>
       <rect x="${p.x}" y="${p.y}" width="${boxW}" height="${boxH}" rx="8"
             fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>
@@ -533,9 +542,9 @@ function renderSide(idx){
   // node list with statuses + FULL instruction (not truncated) per node
   h+=`<h3>Nodes in this frame</h3>`;
   frame.nodes.forEach(n=>{
-    const s=DATA.status[n.id]||'—';
-    const col=s==='success'?'#7ee2a8':(s==='error'?'#ffa0b0':'#9aa7b5');
-    h+=`<div style="margin:6px 0 2px"><span class="dot" style="background:${statusColor(n.id)}"></span>`+
+    const s=effStatus(n, idx);
+    const col=s==='success'?'#7ee2a8':(s==='error'?'#ffa0b0':(s==='pending'?'#ffd97a':'#9aa7b5'));
+    h+=`<div style="margin:6px 0 2px"><span class="dot" style="background:${colorOf(s)}"></span>`+
        `<b>${esc(n.id)}</b> <span style="color:${col}">[${esc(s)}]</span>`+
        (n.deps.length?` <span style="color:#7a8694">← ${n.deps.map(esc).join(', ')}</span>`:'')+`</div>`;
     if(n.desc) h+=`<div style="color:#9aa7b5;font-size:12px;margin-left:14px">${esc(n.desc)}</div>`;
@@ -551,7 +560,7 @@ function renderSide(idx){
 }
 
 function render(){
-  document.getElementById('graph').innerHTML=renderGraph(DATA.frames[cur]);
+  document.getElementById('graph').innerHTML=renderGraph(DATA.frames[cur], cur);
   document.getElementById('side').innerHTML=renderSide(cur);
   const f=DATA.frames[cur];
   document.getElementById('frameLabel').textContent=
