@@ -118,17 +118,16 @@ def single_report(run_dir: Path) -> str:
 
     # Per-test-case table
     L.append("## Per-test-case analysis\n")
-    L.append("`replans` = replan actions applied; `init nodes` / `final nodes` "
-             "= graph size (incl. the aggregation node) before / after "
-             "replanning; `steps` = total CUA steps executed.\n")
+    L.append("Success: ✅ = score 1.0, ❌ = score 0, ⚠️ = partial credit "
+             "(0 < score < 1). `replans` = replan actions applied; "
+             "`init nodes` / `final nodes` = graph size (incl. the aggregation "
+             "node) before / after replanning; `steps` = total CUA steps.\n")
     L.append("| Task ID | Domain | Success | Replans | Init nodes | Final nodes | Steps | Instruction |")
     L.append("|---|---|---|---|---|---|---|---|")
     for r in sorted(recs, key=lambda x: (x["domain"] or "", x["task_id"])):
         ok = "✅" if (isinstance(r["score"], (int, float)) and r["score"] >= 1.0) else (
             f"⚠️ {r['score']:.2f}" if isinstance(r["score"], (int, float)) and r["score"] > 0 else "❌")
-        instr = r["instruction"]
-        instr = instr if len(instr) <= 160 else instr[:159] + "…"
-        instr = instr.replace("|", "\\|")
+        instr = r["instruction"].replace("|", "\\|")
         L.append(f"| `{r['task_id'][:13]}` | {r['domain']} | {ok} | "
                  f"{r['replans_applied']} | {r['initial_nodes']} | {r['final_nodes']} | "
                  f"{r['steps']} | {instr} |")
