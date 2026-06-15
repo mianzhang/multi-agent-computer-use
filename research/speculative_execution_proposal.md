@@ -71,6 +71,15 @@ they are serialized only by the replan loop. If we move that diversity to the
 *front* and run the branches *concurrently*, a serial chain of `k` attempts
 (≈ `k×` latency) collapses to a single parallel round (≈ `1×` latency).
 
+**Empirical support (subset36, replan=5):** dynamic growth is exactly the
+retry/variant machinery PSE would parallelize. Across 36 tasks the manager
+added 15 nodes at runtime — 6 fresh retries, 3 strategy variants, 6 init_from
+(incremental continuations) — and these concentrate on the hard tasks (e.g.
+`22a4636f` added 6: five serial retries + one variant). Each of those serial
+retries is an independent branch the system discovered one failure at a time;
+PSE would launch them at once. (Full breakdown: §node dynamics in
+`research/weekly_report.md`.)
+
 This is the software analogue of CPU **speculative execution**: rather than
 stall at an unknown branch, execute predicted paths in parallel and squash the
 losers.

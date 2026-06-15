@@ -79,6 +79,33 @@ full 369-task distribution; fixed seed for reproducibility).
 `multi_apps` (multi-application, long-horizon) is the clear bottleneck at 40%
 under both budgets, and accounts for most of the cost and latency.
 
+### 3.3 Graph dynamics (how the DAG grows at runtime)
+
+Breaking each task's nodes into *initial* (planned in the first decomposition)
+vs *dynamically added* by replanning (further split into **retry**, **variant**
+= alternative strategy, **init_from** = a node that inherits a predecessor's VM
+state and continues incrementally):
+
+| | replan = 1 | replan = 5 |
+|---|---|---|
+| Initial CUA subtasks (total / mean) | 49 / 1.4 | 49 / 1.4 |
+| **Dynamically added nodes** | **4** | **15** |
+| ├─ retry (fresh attempt) | 1 | 6 |
+| ├─ init_from (inherit state) | 3 | 6 |
+| └─ variant (alternative strategy) | 0 | 3 |
+| Tasks that grew their graph | 4/36 | 7/36 |
+
+Observations:
+- **Initial decomposition is identical (49 nodes) regardless of budget** — the
+  budget only affects *dynamic* growth, which is where the +8.3 pts come from.
+- replan=5 adds ~4× more nodes (15 vs 4), and uses *richer* operations:
+  fresh retries, **init_from** (incremental continuation on a predecessor's
+  state — more efficient than re-doing from scratch), and **variant** branches
+  (e.g. GUI vs CLI strategies for the same goal).
+- Graph growth concentrates on the hard tasks: the most-grown task
+  (`22a4636f`, multi_apps) added 6 nodes (5 retry + 1 variant) yet still failed
+  — heavy growth correlates with difficulty, not eventual success.
+
 ## 4. Failure Analysis (replan = 5)
 
 Classifying all 36 tasks by outcome:
