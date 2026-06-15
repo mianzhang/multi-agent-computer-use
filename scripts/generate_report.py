@@ -58,9 +58,22 @@ _CAT_LABEL = {
 _CAT_ORDER = ["success", "partial", "false_success", "agent_gaveup", "infra_fail"]
 
 
+def _count_steps(task_path: Path) -> int:
+    """Total CUA steps across all subtasks (counts 'Step N in trajectory')."""
+    total = 0
+    for log in task_path.glob("*/subprocess.log"):
+        try:
+            total += len(re.findall(r"Step \d+ in trajectory",
+                                    log.read_text(errors="ignore")))
+        except OSError:
+            pass
+    return total
+
+
 def _enrich(run_dir: Path, rec: dict) -> dict:
-    """Add failure-classification fields by reading the task's final_results."""
-    fr = json.load(open(run_dir / rec["task_id"] / "final_results.json"))
+    """Add failure-classification + per-task table fields from final_results."""
+    task_path = run_dir / rec["task_id"]
+    fr = json.load(open(task_path / "final_results.json"))
     sub = {k: v for k, v in (fr.get("subtask_results") or {}).items()
            if k != "final_aggregation"}
     no_traj = sum(1 for v in sub.values()
@@ -72,6 +85,10 @@ def _enrich(run_dir: Path, rec: dict) -> dict:
     rec["resp"] = " ".join(resp.split())[:90]
     rec["category"] = _classify_failure(rec, no_traj, executed, claims_fail)
     rec["no_traj"] = no_traj
+    rec["instruction"] = " ".join((fr.get("instruction") or "").split())
+    rec["steps"] = _count_steps(task_path)
+    # initial node count includes the aggregation node, to match final_nodes
+    rec["initial_nodes"] = (rec.get("initial_cua") or 0) + 1
     return rec
 
 
@@ -97,6 +114,24 @@ def single_report(run_dir: Path) -> str:
     for dom in sorted(inv):
         ids = "<br>".join(f"`{t}`" for t in inv[dom])
         L.append(f"| {dom} | {len(inv[dom])} | {ids} |")
+    L.append("")
+
+    # Per-test-case table
+    L.append("## Per-test-case analysis\n")
+    L.append("`replans` = replan actions applied; `init nodes` / `final nodes` "
+             "= graph size (incl. the aggregation node) before / after "
+             "replanning; `steps` = total CUA steps executed.\n")
+    L.append("| Task ID | Domain | Success | Replans | Init nodes | Final nodes | Steps | Instruction |")
+    L.append("|---|---|---|---|---|---|---|---|")
+    for r in sorted(recs, key=lambda x: (x["domain"] or "", x["task_id"])):
+        ok = "✅" if (isinstance(r["score"], (int, float)) and r["score"] >= 1.0) else (
+            f"⚠️ {r['score']:.2f}" if isinstance(r["score"], (int, float)) and r["score"] > 0 else "❌")
+        instr = r["instruction"]
+        instr = instr if len(instr) <= 160 else instr[:159] + "…"
+        instr = instr.replace("|", "\\|")
+        L.append(f"| `{r['task_id'][:13]}` | {r['domain']} | {ok} | "
+                 f"{r['replans_applied']} | {r['initial_nodes']} | {r['final_nodes']} | "
+                 f"{r['steps']} | {instr} |")
     L.append("")
 
     # 1. Overall
