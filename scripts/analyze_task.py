@@ -123,6 +123,77 @@ def node_response_map(final_results: Optional[dict]) -> dict[str, str]:
     return out
 
 
+def node_taxonomy(task_dir: Path) -> dict:
+    """Account for every node by origin and type.
+
+    origin: 'initial' (planned in the first graph) vs 'added' (created
+    dynamically by a replan). marker: 'init_from' (inherits a predecessor's VM
+    state) > 'variant' (a strategy variant of another node) > 'plain'.
+    Dynamically-added plain CUA nodes are the classic "retry" nodes.
+
+    Returns counts plus the per-node detail list.
+    """
+    snapshots = load_snapshots(task_dir)
+    # initial node ids = subtasks present in the very first snapshot
+    initial_ids: set[str] = set()
+    if snapshots:
+        for st in _graph_body(snapshots[0]["data"]).get("subtasks", []) or []:
+            initial_ids.add(st["id"])
+    # union of all nodes ever seen, carrying their markers
+    seen: dict[str, dict] = {}
+    agg_id = None
+    for snap in snapshots:
+        body = _graph_body(snap["data"])
+        for st in body.get("subtasks", []) or []:
+            cur = seen.setdefault(st["id"], {"variant_of": None, "init_from": None})
+            cur["variant_of"] = cur["variant_of"] or st.get("variant_of")
+            cur["init_from"] = cur["init_from"] or st.get("init_from")
+        agg = body.get("aggregation")
+        if agg and agg.get("id"):
+            agg_id = agg["id"]
+    # which nodes were added dynamically by a replan (from the replan log)
+    added_ids: set[str] = set()
+    for r in _load_jsonl(task_dir / "replan_log.jsonl"):
+        dec = r.get("decision") or {}
+        for a in (dec.get("add") or []):
+            if isinstance(a, dict) and a.get("id"):
+                added_ids.add(a["id"])
+                cur = seen.setdefault(a["id"], {"variant_of": None, "init_from": None})
+                cur["variant_of"] = cur["variant_of"] or a.get("variant_of")
+                cur["init_from"] = cur["init_from"] or a.get("init_from")
+
+    def marker(nid: str) -> str:
+        m = seen.get(nid, {})
+        if m.get("init_from"):
+            return "init_from"
+        if m.get("variant_of"):
+            return "variant"
+        return "plain"
+
+    detail = []
+    counts = {
+        "initial_cua": 0, "added_total": 0,
+        "added_retry": 0, "added_variant": 0, "added_init_from": 0,
+        "initial_init_from": 0, "initial_variant": 0,
+        "aggregation": 1 if agg_id else 0,
+        "final_total": 0,
+    }
+    cua_ids = set(seen) | initial_ids
+    for nid in cua_ids:
+        origin = "initial" if nid in initial_ids else "added"
+        mk = marker(nid)
+        detail.append({"id": nid, "origin": origin, "marker": mk})
+        if origin == "initial":
+            counts["initial_cua"] += 1
+            if mk == "init_from": counts["initial_init_from"] += 1
+            elif mk == "variant": counts["initial_variant"] += 1
+        else:
+            counts["added_total"] += 1
+            counts[f"added_{ 'retry' if mk=='plain' else mk}"] += 1
+    counts["final_total"] = counts["initial_cua"] + counts["added_total"] + counts["aggregation"]
+    return {"counts": counts, "detail": detail}
+
+
 # --------------------------------------------------------------------------- #
 # Terminal report
 # --------------------------------------------------------------------------- #
@@ -292,6 +363,22 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
     if fr and fr.get("final_response"):
         print(f"\n   {_c('Final response:', 'bold', use_color)}")
         print(f"   {_trunc(fr['final_response'], 300)}")
+
+    # --- node accounting: how the graph grew ---
+    tax = node_taxonomy(task_dir)
+    c = tax["counts"]
+    print()
+    print(h("─" * 78))
+    print(h(" NODE ACCOUNTING  (what the manager added dynamically)"))
+    print(h("─" * 78))
+    print(f"   initial CUA subtasks   : {c['initial_cua']}"
+          + (f"  (of which init_from={c['initial_init_from']}, variant={c['initial_variant']})"
+             if c['initial_init_from'] or c['initial_variant'] else ""))
+    print(f"   {_c('dynamically added', 'yellow', use_color)}      : {c['added_total']}"
+          f"   → retry={c['added_retry']}, "
+          f"init_from={c['added_init_from']}, variant={c['added_variant']}")
+    print(f"   aggregation (manager)  : {c['aggregation']}")
+    print(f"   {_c('final graph size', 'bold', use_color)}       : {c['final_total']} nodes")
 
     print()
     print(h("═" * 78))

@@ -20,9 +20,13 @@ import argparse
 import csv as _csv
 import json
 import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from analyze_task import node_taxonomy  # noqa: E402
 
 
 C = {"reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
@@ -61,6 +65,7 @@ def collect(run_dir: Path) -> list[dict]:
         sub = fr.get("subtask_results", {}) or {}
         n_cua = sum(1 for k in sub if k != "final_aggregation")
         score = fr.get("osworld_evaluator_score")
+        tax = node_taxonomy(d)["counts"]
         recs.append({
             "task_id": d.name,
             "state": "done",
@@ -74,6 +79,12 @@ def collect(run_dir: Path) -> list[dict]:
             "replans_calls": rp.get("num_calls"),
             "n_subtasks": n_cua,
             "infeasible": fr.get("osworld_infeasible_verdict"),
+            "initial_cua": tax["initial_cua"],
+            "added_total": tax["added_total"],
+            "added_retry": tax["added_retry"],
+            "added_init_from": tax["added_init_from"],
+            "added_variant": tax["added_variant"],
+            "final_nodes": tax["final_total"],
         })
     return recs
 
@@ -152,6 +163,35 @@ def report(run_dir: Path, tasks_file: Optional[str], use_color: bool) -> list[di
         print(f"  Replans applied          : {tot_replan} across {len(done)} tasks "
               f"(mean {tot_replan/len(done):.1f}/task)")
 
+    # --- node dynamics: how the graphs grew ---
+    if done:
+        print()
+        print(h("─" * 74))
+        print(h(" NODE DYNAMICS  (graph structure across the run)"))
+        print(h("─" * 74))
+        si = sum(r.get("initial_cua") or 0 for r in done)
+        sa = sum(r.get("added_total") or 0 for r in done)
+        sr_ = sum(r.get("added_retry") or 0 for r in done)
+        sif = sum(r.get("added_init_from") or 0 for r in done)
+        sv = sum(r.get("added_variant") or 0 for r in done)
+        n = len(done)
+        grew = sum(1 for r in done if (r.get("added_total") or 0) > 0)
+        print(f"  Initial CUA subtasks     : {si} total (mean {si/n:.1f}/task)")
+        print(f"  Dynamically added nodes  : {sa} total (mean {sa/n:.1f}/task) "
+              f"— {grew}/{n} tasks grew their graph")
+        print(f"      ├─ retry (fresh)     : {sr_}")
+        print(f"      ├─ init_from (inherit state) : {sif}")
+        print(f"      └─ variant (alt strategy)    : {sv}")
+        # tasks that grew the most
+        top = sorted(done, key=lambda r: -(r.get("added_total") or 0))[:5]
+        top = [r for r in top if (r.get("added_total") or 0) > 0]
+        if top:
+            print(f"  Most-grown tasks:")
+            for r in top:
+                print(f"      +{r['added_total']:>2} (retry={r['added_retry']},"
+                      f" init_from={r['added_init_from']}, variant={r['added_variant']})"
+                      f"  {r['domain']:<16} {r['task_id'][:16]}")
+
     # --- per-domain ---
     print()
     print(h("─" * 74))
@@ -196,7 +236,9 @@ def report(run_dir: Path, tasks_file: Optional[str], use_color: bool) -> list[di
 def write_csv(recs: list[dict], path: str) -> None:
     cols = ["task_id", "state", "domain", "score", "success", "cost",
             "duration", "inference", "replans_applied", "replans_calls",
-            "n_subtasks", "infeasible"]
+            "n_subtasks", "infeasible",
+            "initial_cua", "added_total", "added_retry", "added_init_from",
+            "added_variant", "final_nodes"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
