@@ -209,7 +209,7 @@ def report(run_dir: Path, tasks_file: Optional[str], use_color: bool) -> list[di
         print(h(" REPLAN EFFECT  (did replanning actually change graph structure?)"))
         print(h("─" * 74))
         print(f"  Replan calls             : {rc}")
-        print(f"  ├─ declined (no change)  : {rn}  ({rn/rc*100:.0f}%)" if rc else "")
+        print(f"  ├─ no change (confirmed as-is) : {rn}  ({rn/rc*100:.0f}%)" if rc else "")
         print(f"  └─ applied               : {applied}  ({applied/rc*100:.0f}%)" if rc else "")
         if applied:
             print(f"       ├─ instruction-only : {ri}  ({ri/applied*100:.0f}% of applied — topology UNCHANGED)")

@@ -214,7 +214,7 @@ def replan_effects(task_dir: Path) -> dict:
     """Did replanning actually change the GRAPH STRUCTURE, or just rewrite text?
 
     Classifies every replan call from replan_log.jsonl into:
-      - no_change         : manager declined to apply any edit
+      - no_change         : manager confirmed the graph as-is (applied no edit)
       - instruction_only  : applied, but only rewrote instruction text — the
                             graph topology (nodes + dependency edges) is unchanged
       - structural        : applied AND changed topology (added/removed/cancelled
@@ -458,7 +458,7 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
         print(h(" REPLAN EFFECT  (did replanning change the graph STRUCTURE?)"))
         print(h("─" * 78))
         print(f"   replan calls           : {e['calls']}")
-        print(f"   ├─ no change (declined): {e['no_change']}")
+        print(f"   ├─ no change (graph confirmed as-is): {e['no_change']}")
         print(f"   ├─ {_c('instruction-only', 'dim', use_color)}    : {e['instruction_only']}  "
               f"(applied, but graph topology unchanged)")
         print(f"   └─ {_c('structural', 'yellow', use_color)}          : {e['structural']}  "
