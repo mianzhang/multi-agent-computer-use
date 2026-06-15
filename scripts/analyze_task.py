@@ -194,6 +194,75 @@ def node_taxonomy(task_dir: Path) -> dict:
     return {"counts": counts, "detail": detail}
 
 
+def _snapshot_nodes_edges(snapshot: dict) -> tuple[set, set]:
+    body = _graph_body(snapshot)
+    nodes: set = set()
+    edges: set = set()
+    for st in body.get("subtasks", []) or []:
+        nodes.add(st["id"])
+        for dep in st.get("dependencies", []) or []:
+            edges.add((dep, st["id"]))
+    agg = body.get("aggregation")
+    if agg and agg.get("id"):
+        nodes.add(agg["id"])
+        for dep in agg.get("dependencies", []) or []:
+            edges.add((dep, agg["id"]))
+    return nodes, edges
+
+
+def replan_effects(task_dir: Path) -> dict:
+    """Did replanning actually change the GRAPH STRUCTURE, or just rewrite text?
+
+    Classifies every replan call from replan_log.jsonl into:
+      - no_change         : manager declined to apply any edit
+      - instruction_only  : applied, but only rewrote instruction text — the
+                            graph topology (nodes + dependency edges) is unchanged
+      - structural        : applied AND changed topology (added/removed/cancelled
+                            a node, or rewired a dependency edge)
+    Also confirms structural changes against consecutive graph snapshots
+    (ground truth: did the node-set / edge-set actually differ).
+    """
+    log = _load_jsonl(task_dir / "replan_log.jsonl")
+    counts = {"calls": 0, "no_change": 0, "instruction_only": 0, "structural": 0}
+    per_call = []
+    for r in log:
+        counts["calls"] += 1
+        applied = r.get("applied")
+        dec = r.get("decision") or {}
+        if not applied:
+            counts["no_change"] += 1
+            per_call.append({"iter": r.get("iteration"), "trigger": r.get("trigger_sid"),
+                             "effect": "no_change"})
+            continue
+        mod = dec.get("modify") or {}
+        mod_deps = any("dependencies" in (v or {}) for v in mod.values())
+        mod_instr = any("instruction" in (v or {}) for v in mod.values())
+        structural = bool(dec.get("add") or dec.get("remove") or dec.get("cancel") or mod_deps)
+        if structural:
+            counts["structural"] += 1
+            effect = "structural"
+        elif mod_instr:
+            counts["instruction_only"] += 1
+            effect = "instruction_only"
+        else:
+            counts["instruction_only"] += 1  # applied no-op, treat as non-structural
+            effect = "instruction_only"
+        per_call.append({"iter": r.get("iteration"), "trigger": r.get("trigger_sid"),
+                         "effect": effect})
+
+    # ground-truth structural transitions from snapshots
+    snaps = load_snapshots(task_dir)
+    snapshot_structural_changes = 0
+    prev = None
+    for s in snaps:
+        ne = _snapshot_nodes_edges(s["data"])
+        if prev is not None and ne != prev:
+            snapshot_structural_changes += 1
+        prev = ne
+    counts["snapshot_structural_changes"] = snapshot_structural_changes
+    return {"counts": counts, "per_call": per_call}
+
+
 # --------------------------------------------------------------------------- #
 # Terminal report
 # --------------------------------------------------------------------------- #
@@ -379,6 +448,22 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
           f"init_from={c['added_init_from']}, variant={c['added_variant']}")
     print(f"   aggregation (manager)  : {c['aggregation']}")
     print(f"   {_c('final graph size', 'bold', use_color)}       : {c['final_total']} nodes")
+
+    # --- did replanning actually change graph structure? ---
+    eff = replan_effects(task_dir)
+    e = eff["counts"]
+    if e["calls"]:
+        print()
+        print(h("─" * 78))
+        print(h(" REPLAN EFFECT  (did replanning change the graph STRUCTURE?)"))
+        print(h("─" * 78))
+        print(f"   replan calls           : {e['calls']}")
+        print(f"   ├─ no change (declined): {e['no_change']}")
+        print(f"   ├─ {_c('instruction-only', 'dim', use_color)}    : {e['instruction_only']}  "
+              f"(applied, but graph topology unchanged)")
+        print(f"   └─ {_c('structural', 'yellow', use_color)}          : {e['structural']}  "
+              f"(added/removed node or rewired edge)")
+        print(f"   snapshot-verified structural transitions: {e['snapshot_structural_changes']}")
 
     print()
     print(h("═" * 78))

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analyze_task import node_taxonomy  # noqa: E402
+from analyze_task import node_taxonomy, replan_effects  # noqa: E402
 
 
 C = {"reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
@@ -66,6 +66,7 @@ def collect(run_dir: Path) -> list[dict]:
         n_cua = sum(1 for k in sub if k != "final_aggregation")
         score = fr.get("osworld_evaluator_score")
         tax = node_taxonomy(d)["counts"]
+        reff = replan_effects(d)["counts"]
         recs.append({
             "task_id": d.name,
             "state": "done",
@@ -85,6 +86,10 @@ def collect(run_dir: Path) -> list[dict]:
             "added_init_from": tax["added_init_from"],
             "added_variant": tax["added_variant"],
             "final_nodes": tax["final_total"],
+            "replan_calls": reff["calls"],
+            "replan_no_change": reff["no_change"],
+            "replan_instr_only": reff["instruction_only"],
+            "replan_structural": reff["structural"],
         })
     return recs
 
@@ -192,6 +197,26 @@ def report(run_dir: Path, tasks_file: Optional[str], use_color: bool) -> list[di
                       f" init_from={r['added_init_from']}, variant={r['added_variant']})"
                       f"  {r['domain']:<16} {r['task_id'][:16]}")
 
+    # --- replan effect: applied vs actually-structural ---
+    if done:
+        rc = sum(r.get("replan_calls") or 0 for r in done)
+        rn = sum(r.get("replan_no_change") or 0 for r in done)
+        ri = sum(r.get("replan_instr_only") or 0 for r in done)
+        rs = sum(r.get("replan_structural") or 0 for r in done)
+        applied = ri + rs
+        print()
+        print(h("─" * 74))
+        print(h(" REPLAN EFFECT  (did replanning actually change graph structure?)"))
+        print(h("─" * 74))
+        print(f"  Replan calls             : {rc}")
+        print(f"  ├─ declined (no change)  : {rn}  ({rn/rc*100:.0f}%)" if rc else "")
+        print(f"  └─ applied               : {applied}  ({applied/rc*100:.0f}%)" if rc else "")
+        if applied:
+            print(f"       ├─ instruction-only : {ri}  ({ri/applied*100:.0f}% of applied — topology UNCHANGED)")
+            print(f"       └─ structural       : {rs}  ({rs/applied*100:.0f}% of applied — nodes/edges changed)")
+        tasks_structural = sum(1 for r in done if (r.get("replan_structural") or 0) > 0)
+        print(f"  Tasks with ≥1 structural replan: {tasks_structural}/{len(done)}")
+
     # --- per-domain ---
     print()
     print(h("─" * 74))
@@ -238,7 +263,9 @@ def write_csv(recs: list[dict], path: str) -> None:
             "duration", "inference", "replans_applied", "replans_calls",
             "n_subtasks", "infeasible",
             "initial_cua", "added_total", "added_retry", "added_init_from",
-            "added_variant", "final_nodes"]
+            "added_variant", "final_nodes",
+            "replan_calls", "replan_no_change", "replan_instr_only",
+            "replan_structural"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
