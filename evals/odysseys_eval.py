@@ -31,13 +31,13 @@ try:
 except ImportError:
     load_dotenv = None
 
-DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_MAX_IMAGES = 200
 FINAL_JUDGMENT_MAX_COMPLETION_TOKENS = 8192
 
 # USD per 1M tokens. Match against the lowercased model name.
 PRICING_USD_PER_M_TOKENS: dict[str, dict[str, float]] = {
-    "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.5},
+    "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.5},
 }
 
 
@@ -94,17 +94,20 @@ def append_unique(items: list[str], value: str) -> None:
 
 
 def make_client(args: argparse.Namespace) -> tuple[str, Any]:
-    if args.model.lower().startswith("gemini"):
-        api_key = args.gemini_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise SystemExit("Gemini API key required. Set GEMINI_API_KEY / GOOGLE_API_KEY or pass --gemini-api-key.")
-        return "gemini", genai.Client(api_key=api_key)
+    api_base = args.api_base or os.getenv("OPENAI_BASE_URL")
+    gemini_key = args.gemini_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    # Use the native Google API only when no OpenAI-compatible base is configured
+    # AND a Google key is present. Otherwise route gemini (and everything else)
+    # through the OpenAI-compatible endpoint (e.g. the LiteLLM proxy), which
+    # serves gemini models too.
+    if args.model.lower().startswith("gemini") and gemini_key and not api_base:
+        return "gemini", genai.Client(api_key=gemini_key)
     api_key = args.api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise SystemExit("OpenAI API key required. Set OPENAI_API_KEY or pass --api-key.")
     kwargs = {"api_key": api_key}
-    if args.api_base:
-        kwargs["base_url"] = args.api_base
+    if api_base:
+        kwargs["base_url"] = api_base
     return "openai", AsyncOpenAI(**kwargs)
 
 
@@ -439,11 +442,11 @@ async def main_async(args: argparse.Namespace) -> None:
     if pending:
         concurrency = min(max(1, args.num_workers), len(pending))
         rubric_concurrency = max(1, getattr(args, "max_concurrent_rubrics", 1))
+        backend, client = make_client(args)
         print(
-            f"Backend: {'gemini' if args.model.lower().startswith('gemini') else 'openai'} ({args.model}), "
+            f"Backend: {backend} ({args.model}), "
             f"run_concurrency={concurrency}, rubric_concurrency={rubric_concurrency}"
         )
-        backend, client = make_client(args)
         semaphore = asyncio.Semaphore(concurrency)
 
         async def run_one(run_dir: Path) -> dict[str, Any]:

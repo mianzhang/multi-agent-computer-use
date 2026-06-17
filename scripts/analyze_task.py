@@ -292,7 +292,47 @@ def _wrap(s: str, width: int = 88, indent: str = "        ") -> str:
     return ("\n" + indent).join(lines)
 
 
-def print_report(task_dir: Path, use_color: bool = True) -> None:
+def task_text_of(task_dir: Path, fr: Optional[dict]) -> str:
+    """The task instruction. OSWorld uses 'instruction'; odysseys/CUA web runs
+    use 'task_text'. Fall back to the first graph snapshot's task_text."""
+    for key in ("instruction", "task_text"):
+        v = (fr or {}).get(key)
+        if v:
+            return str(v)
+    snaps = load_snapshots(task_dir)
+    if snaps:
+        d = snaps[0]["data"]
+        return str(d.get("task_text") or d.get("instruction") or "")
+    return ""
+
+
+def load_eval_record(task_dir: Path, eval_json: Optional[str]) -> Optional[dict]:
+    """Find this task's odysseys-eval record (avg + per-rubric verdicts).
+
+    Looks at --eval-json if given, else common default locations. Matches the
+    record whose task_id equals this task folder's name.
+    """
+    tid = task_dir.name
+    candidates = []
+    if eval_json:
+        candidates.append(Path(eval_json))
+    candidates += [
+        task_dir / "odysseys_eval.json",
+        task_dir.parent / f"{task_dir.parent.name}_eval.json",
+        task_dir.parent / "odysseys_eval.json",
+    ]
+    for p in candidates:
+        data = _load_json(p) if p and p.exists() else None
+        if not data:
+            continue
+        tasks = data.get("tasks") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        for t in tasks or []:
+            if isinstance(t, dict) and t.get("task_id") == tid:
+                return t
+    return None
+
+
+def print_report(task_dir: Path, use_color: bool = True, eval_json: Optional[str] = None) -> None:
     fr = _load_json(task_dir / "final_results.json")
     summary = _load_json(task_dir / "summary.json")
     snapshots = load_snapshots(task_dir)
@@ -314,9 +354,11 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
         sc_str = ("n/a" if score is None else f"{score}")
         sc_col = "green" if isinstance(score, (int, float)) and score >= 1.0 else (
             "yellow" if isinstance(score, (int, float)) and score > 0 else "red")
-        print(f"  Domain      : {fr.get('domain','?')}")
-        print(f"  Instruction : {_trunc(fr.get('instruction',''), 100)}")
-        print(f"  Eval score  : {_c(sc_str, sc_col, use_color)}")
+        if fr.get("domain"):
+            print(f"  Domain      : {fr.get('domain')}")
+        print(f"  Instruction : {_trunc(task_text_of(task_dir, fr), 100)}")
+        if score is not None:
+            print(f"  Eval score  : {_c(sc_str, sc_col, use_color)}")
         rp = fr.get("replanning", {}) or {}
         print(f"  Replanning  : {rp.get('num_applied','?')} applied / "
               f"{rp.get('num_calls','?')} calls / {rp.get('snapshot_count','?')} snapshots")
@@ -328,6 +370,28 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
         print(f"  Cost        : ${summary.get('total_cost_usd',0):.4f} "
               f"(CUA ${summary.get('total_cua_cost_usd',0):.4f} / "
               f"Manager ${summary.get('total_manager_cost_usd',0):.4f})")
+
+    # --- odysseys rubric evaluation (if an eval JSON is available) ---
+    ev = load_eval_record(task_dir, eval_json)
+    if ev:
+        avg = ev.get("average_rubric_score")
+        rubs = ev.get("rubric_results") or []
+        npass = sum(1 for r in rubs if r.get("score"))
+        avg_col = ("green" if isinstance(avg, (int, float)) and avg >= 1.0
+                   else "yellow" if isinstance(avg, (int, float)) and avg > 0 else "red")
+        print()
+        print(h("─" * 78))
+        print(h(" RUBRIC EVALUATION  (odysseys judge: %s)" % ev.get("judge_model", "?")))
+        print(h("─" * 78))
+        print(f"   average rubric score : {_c(f'{avg}', avg_col, use_color)}  "
+              f"({npass}/{len(rubs)} rubrics passed)")
+        for r in rubs:
+            ok = bool(r.get("score"))
+            mark = _c("PASS", "green", use_color) if ok else _c("FAIL", "red", use_color)
+            print(f"   [{mark}] {r.get('rubric_id','?')}: {_trunc(r.get('requirement',''), 90)}")
+            reason = r.get("final_reasoning") or ""
+            if reason:
+                print(f"          {_c('why:', 'dim', use_color)} {_wrap(reason, indent='          ')}")
 
     # --- graph evolution timeline ---
     print()
@@ -472,7 +536,7 @@ def print_report(task_dir: Path, use_color: bool = True) -> None:
 # --------------------------------------------------------------------------- #
 # HTML visualization
 # --------------------------------------------------------------------------- #
-def build_html(task_dir: Path) -> str:
+def build_html(task_dir: Path, eval_json: Optional[str] = None) -> str:
     fr = _load_json(task_dir / "final_results.json")
     snapshots = load_snapshots(task_dir)
     replans = _load_jsonl(task_dir / "replan_log.jsonl")
@@ -516,15 +580,30 @@ def build_html(task_dir: Path) -> str:
             "nodes": nodes,
         })
 
+    ev = load_eval_record(task_dir, eval_json)
+    rubric = None
+    if ev:
+        rubric = {
+            "judge": ev.get("judge_model", ""),
+            "average": ev.get("average_rubric_score"),
+            "results": [
+                {"id": r.get("rubric_id"), "score": r.get("score"),
+                 "requirement": r.get("requirement", ""),
+                 "reasoning": r.get("final_reasoning", "")}
+                for r in (ev.get("rubric_results") or [])
+            ],
+        }
+
     payload = {
         "task_id": task_dir.name,
         "domain": (fr or {}).get("domain", ""),
-        "instruction": (fr or {}).get("instruction", ""),
+        "instruction": task_text_of(task_dir, fr),
         "score": (fr or {}).get("osworld_evaluator_score"),
         "final_response": (fr or {}).get("final_response", ""),
         "status": status,
-        "responses": {k: (v or "")[:240] for k, v in responses.items()},
+        "responses": {k: (v or "") for k, v in responses.items()},
         "recordings": recordings,
+        "rubric": rubric,
         "frames": frames,
         "replans": replans,
     }
@@ -570,7 +649,11 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   h3{font-size:13px;margin:14px 0 6px;color:#7fd0ff;border-bottom:1px solid #2a3441;padding-bottom:4px;}
   .resp{white-space:pre-wrap;color:#cdd6df;font-size:12px;background:#10161e;padding:8px;border-radius:5px;}
   .instr{white-space:pre-wrap;color:#bcc7d2;font-size:11.5px;background:#10161e;padding:7px;border-radius:5px;margin-top:3px;line-height:1.45;}
-  .rec{width:100%;border-radius:5px;margin-top:4px;background:#000;}
+  .reclink{display:inline-block;color:#7fd0ff;text-decoration:none;font-size:12.5px;
+           background:#15331f;border:1px solid #3fbf6f;border-radius:5px;padding:4px 10px;}
+  .reclink:hover{background:#1c4a2c;}
+  .recpath{font-family:monospace;font-size:10.5px;color:#7a8694;margin:0 0 8px 14px;
+           word-break:break-all;}
 </style></head>
 <body>
 <header>
@@ -603,9 +686,23 @@ document.getElementById('tid').textContent = DATA.task_id;
   const s = DATA.score;
   let cls='s-part', txt = (s===null||s===undefined)?'n/a':String(s);
   if (typeof s==='number'){ if(s>=1) cls='s-ok'; else if(s<=0) cls='s-fail'; }
-  document.getElementById('hdrMeta').innerHTML =
-    `<b>domain:</b> ${esc(DATA.domain)} &nbsp;|&nbsp; <b>score:</b> `+
-    `<span class="score ${cls}">${esc(txt)}</span><br><b>task:</b> ${esc(DATA.instruction)}`;
+  let head = `<b>task:</b> ${esc(DATA.instruction)}`;
+  if (DATA.domain) head = `<b>domain:</b> ${esc(DATA.domain)} &nbsp;|&nbsp; <b>score:</b> `+
+    `<span class="score ${cls}">${esc(txt)}</span><br>` + head;
+  // odysseys rubric evaluation, if present
+  if (DATA.rubric){
+    const r=DATA.rubric, avg=r.average;
+    const rc = (typeof avg==='number' && avg>=1)?'s-ok':((typeof avg==='number'&&avg<=0)?'s-fail':'s-part');
+    let items = (r.results||[]).map(x=>{
+      const ok = !!x.score;
+      return `<div style="margin:3px 0"><span class="score ${ok?'s-ok':'s-fail'}">${ok?'PASS':'FAIL'}</span> `+
+             `<b>${esc(x.id)}</b>: ${esc(x.requirement)}`+
+             (x.reasoning?`<div style="color:#9aa7b5;font-size:11.5px;margin:2px 0 0 8px">${esc(x.reasoning)}</div>`:'')+`</div>`;
+    }).join('');
+    head += `<br><b>rubric eval (${esc(r.judge)}):</b> <span class="score ${rc}">${esc(String(avg))}</span>`+
+            `<div style="margin-top:4px">${items}</div>`;
+  }
+  document.getElementById('hdrMeta').innerHTML = head;
 })();
 
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
@@ -739,8 +836,14 @@ function renderSide(idx){
     }
     const rec=DATA.recordings[n.id];
     if(rec){
-      h+=`<details style="margin:2px 0 8px 14px" open><summary style="cursor:pointer;color:#7fd0ff;font-size:12px">screen recording</summary>`+
-         `<video class="rec" controls preload="metadata" src="${esc(rec)}"></video></details>`;
+      h+=`<div style="margin:3px 0 2px 14px"><a class="reclink" href="${esc(rec)}" target="_blank" rel="noopener">▶ open screen recording</a></div>`+
+         `<div class="recpath" title="path relative to this HTML file">${esc(rec)}</div>`;
+    }
+    // the subagent's own final response / self-report when it finished
+    const resp=DATA.responses[n.id];
+    if(resp){
+      h+=`<details style="margin:2px 0 8px 14px" open><summary style="cursor:pointer;color:#7fd0ff;font-size:12px">subagent final response</summary>`+
+         `<div class="resp">${esc(resp)}</div></details>`;
     }
   });
   if(idx===DATA.frames.length-1 && DATA.final_response){
@@ -776,6 +879,9 @@ def main() -> None:
     ap.add_argument("--no-html", action="store_true", help="Skip HTML generation")
     ap.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     ap.add_argument("--open", action="store_true", help="Print the HTML path as a file:// URL")
+    ap.add_argument("--eval-json", default=None,
+                    help="odysseys_eval.py output JSON; surfaces rubric scores for this task "
+                         "(auto-detected from common locations if omitted)")
     args = ap.parse_args()
 
     task_dir = Path(args.task_dir).resolve()
@@ -787,11 +893,11 @@ def main() -> None:
             "(no final_results.json or graph_snapshots/). "
             "Pass a single task folder, not the run root.")
 
-    print_report(task_dir, use_color=not args.no_color)
+    print_report(task_dir, use_color=not args.no_color, eval_json=args.eval_json)
 
     if not args.no_html:
         out = task_dir / "analysis.html"
-        out.write_text(build_html(task_dir), encoding="utf-8")
+        out.write_text(build_html(task_dir, eval_json=args.eval_json), encoding="utf-8")
         print(f"\n  HTML visualization → {out}")
         if args.open:
             print(f"  open: file://{out}")
