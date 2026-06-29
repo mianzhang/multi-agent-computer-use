@@ -10,7 +10,7 @@
 # 4 GB; peak VMs ~= NUM_WORKERS * (MAX_PARALLELISM + 1).
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../.."
 
 # ---- config (override via env) ------------------------------------------------
 NUM_WORKERS="${NUM_WORKERS:-6}"        # parallel worker processes (tasks in flight)

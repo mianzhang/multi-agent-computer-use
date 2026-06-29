@@ -88,6 +88,53 @@ Thoughts: <your reasoning, citing specific steps/screenshots>
 Status: "success" or "failure"
 """
 
+
+ONESHOT_JUDGMENT_SYSTEM = """You are an expert evaluator of web-navigation agent trajectories.
+
+You will receive:
+- The user task (for context).
+- A NUMBERED LIST of rubric items, each with an id, requirement, and verification description.
+- The agent's full action history (one line per step).
+- Every screenshot from the trajectory, in chronological order.
+
+Your goal is to judge EACH rubric item INDEPENDENTLY (as if scored on its own), based only on what the
+screenshots and actions actually show. Do not invent state. Filtering/sorting/form requirements must be
+actually applied and confirmed. If the agent was blocked (captcha, access denied) and so could not satisfy
+a rubric, that rubric is a failure.
+
+Output ONLY a JSON array — one object per rubric, covering every rubric id, in this exact shape:
+[{"rubric_id": "<id>", "status": "success" | "failure", "thoughts": "<brief reason citing steps/screenshots>"}]
+No prose before or after the array.
+"""
+
+
+def _parse_oneshot_verdicts(text: str) -> dict[str, tuple[bool, str]]:
+    """Parse the one-shot judge response (a JSON array) into id -> (success, thoughts).
+
+    Tolerates ```json fences and trailing prose; falls back to a per-item regex.
+    """
+    out: dict[str, tuple[bool, str]] = {}
+    m = re.search(r"\[.*\]", text, re.DOTALL)
+    if m:
+        try:
+            arr = json.loads(m.group(0))
+            for obj in arr:
+                if not isinstance(obj, dict):
+                    continue
+                rid = str(obj.get("rubric_id") or obj.get("id") or "").strip()
+                status = str(obj.get("status") or obj.get("score") or "").strip().lower()
+                thoughts = str(obj.get("thoughts") or obj.get("reasoning") or "").strip()
+                if rid:
+                    out[rid] = (status in ("success", "pass", "1", "true"), thoughts)
+            if out:
+                return out
+        except Exception:
+            pass
+    # Fallback: lines like  R1 ... success   /   "rubric_id": "R1" ... "failure"
+    for mm in re.finditer(r'["\']?(?P<id>[A-Za-z]?\d{1,2}|[a-z_]{3,40})["\']?[^\n]{0,80}?(?P<st>success|failure|pass|fail)', text, re.I):
+        out.setdefault(mm.group("id"), (mm.group("st").lower() in ("success", "pass"), ""))
+    return out
+
 def append_unique(items: list[str], value: str) -> None:
     if value and value not in items:
         items.append(value)
@@ -108,6 +155,9 @@ def make_client(args: argparse.Namespace) -> tuple[str, Any]:
     kwargs = {"api_key": api_key}
     if api_base:
         kwargs["base_url"] = api_base
+    # Bound each judge request so one stalled call can't hang the whole run.
+    kwargs["timeout"] = float(os.getenv("ODY_JUDGE_TIMEOUT", "180"))
+    kwargs["max_retries"] = 3
     return "openai", AsyncOpenAI(**kwargs)
 
 
@@ -153,6 +203,7 @@ async def evaluate_run(
     max_images: int,
     max_steps: Optional[int] = None,
     max_concurrent_rubrics: int = 1,
+    oneshot: bool = False,
 ) -> dict[str, Any]:
     task_id = infer_task_id(run_dir)
     meta = task_index.get(task_id) or {}
@@ -321,10 +372,66 @@ async def evaluate_run(
             "final_reasoning": reasoning,
         }, input_tokens, output_tokens
 
-    judged_rubrics = await asyncio.gather(*(judge_rubric(rubric) for rubric in rubrics))
-    rubric_results = [item for item, _, _ in judged_rubrics]
-    total_input_tokens = sum(input_tokens for _, input_tokens, _ in judged_rubrics)
-    total_output_tokens = sum(output_tokens for _, _, output_tokens in judged_rubrics)
+    async def judge_all_oneshot() -> tuple[list[dict[str, Any]], int, int]:
+        """Judge ALL rubrics in a single call (screenshots sent once)."""
+        rubric_block = "\n\n".join(
+            f"[{r.get('id', '?')}] Requirement: {str(r.get('requirement', '')).strip()}"
+            + (f"\n     Verification: {str(r.get('verification', '')).strip()}"
+               if str(r.get("verification", "")).strip() else "")
+            for r in rubrics
+        )
+        ids = [r.get("id", "?") for r in rubrics]
+        user_text = (
+            f"User Task: {task}\n\nEvaluate EACH of these {len(rubrics)} rubric items independently:\n\n{rubric_block}"
+            f"\n\nFull Action History:\n{action_history}\n\nScreenshots attached below: {len(screenshot_assets)} "
+            f"(trajectory had {len(steps)} total step(s)).\n\n"
+            f"Return ONLY a JSON array with one object per rubric covering every id {ids}, shape: "
+            '[{"rubric_id":"<id>","status":"success"|"failure","thoughts":"<brief>"}].'
+        )
+        in_tok = out_tok = 0
+        try:
+            if backend == "gemini":
+                response = await client.aio.models.generate_content(
+                    model=model,
+                    contents=[types.Content(role="user", parts=[types.Part.from_text(text=user_text)] + [types.Part.from_bytes(data=s["bytes"], mime_type=s["mime"]) for s in screenshot_assets])],
+                    config=types.GenerateContentConfig(system_instruction=ONESHOT_JUDGMENT_SYSTEM, max_output_tokens=FINAL_JUDGMENT_MAX_COMPLETION_TOKENS),
+                )
+                result_text = str(response.text or "").strip()
+            else:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": ONESHOT_JUDGMENT_SYSTEM}, {"role": "user", "content": [{"type": "text", "text": user_text}] + [{"type": "image_url", "image_url": {"url": s["data_url"], "detail": "high"}} for s in screenshot_assets]}],
+                    max_completion_tokens=FINAL_JUDGMENT_MAX_COMPLETION_TOKENS,
+                )
+                result_text = str(response.choices[0].message.content or "").strip()
+            in_tok, out_tok = extract_token_usage(response, backend)
+            verdicts = _parse_oneshot_verdicts(result_text)
+        except Exception as exc:
+            results = [{
+                "rubric_id": r.get("id", "?"), "requirement": r.get("requirement", ""),
+                "verification": r.get("verification", ""), "score": 0, "success": False,
+                "final_reasoning": f"Error judging rubric {r.get('id','?')} (one-shot): {exc}",
+            } for r in rubrics]
+            return results, in_tok, out_tok
+        results = []
+        for r in rubrics:
+            rid = r.get("id", "?")
+            v = verdicts.get(rid)
+            success, reason = v if v is not None else (False, "No verdict returned for this rubric in the one-shot response.")
+            results.append({
+                "rubric_id": rid, "requirement": r.get("requirement", ""),
+                "verification": r.get("verification", ""), "score": 1 if success else 0,
+                "success": success, "final_reasoning": reason,
+            })
+        return results, in_tok, out_tok
+
+    if oneshot:
+        rubric_results, total_input_tokens, total_output_tokens = await judge_all_oneshot()
+    else:
+        judged_rubrics = await asyncio.gather(*(judge_rubric(rubric) for rubric in rubrics))
+        rubric_results = [item for item, _, _ in judged_rubrics]
+        total_input_tokens = sum(input_tokens for _, input_tokens, _ in judged_rubrics)
+        total_output_tokens = sum(output_tokens for _, _, output_tokens in judged_rubrics)
 
     rubric_scores = {item["rubric_id"]: item["score"] for item in rubric_results}
     average = sum(rubric_scores.values()) / len(rubric_scores) if rubric_scores else 0.0
@@ -460,6 +567,7 @@ async def main_async(args: argparse.Namespace) -> None:
                     args.max_images,
                     args.max_steps,
                     rubric_concurrency,
+                    args.oneshot,
                 )
 
         tasks = [asyncio.create_task(run_one(run_dir)) for run_dir in pending]
@@ -538,7 +646,7 @@ def main() -> None:
     parser.add_argument("--gemini-api-key", default=None)
     parser.add_argument("--env-file", type=Path, default=None, help="Path to a .env file to load before reading API keys (default: ./.env if present).")
     parser.add_argument("--max-images", type=int, default=DEFAULT_MAX_IMAGES, help="Keep the last N screenshots per trajectory; 0 = unlimited.")
-    parser.add_argument("--max-steps", type=int, default=100, help="Only consider trajectory rows whose step_num <= this value; default/0 = unlimited.")
+    parser.add_argument("--max-steps", type=int, default=0, help="Only consider trajectory rows whose step_num <= this value; default/0 = unlimited.")
     parser.add_argument("--num-workers", type=int, default=1, help="Max concurrent runs.")
     parser.add_argument(
         "--max-concurrent-rubrics",
@@ -547,6 +655,8 @@ def main() -> None:
         help="Max concurrent rubric judge calls per run. Total judge concurrency is roughly --num-workers * --max-concurrent-rubrics.",
     )
     parser.add_argument("--include-incomplete", action="store_true", default=False, help="Include runs without a numeric result.txt.")
+    parser.add_argument("--oneshot", action="store_true", default=False,
+                        help="Judge ALL rubrics of a task in a single call (screenshots sent once) instead of one call per rubric. Far fewer tokens / 429s; verdicts are less independent.")
     args = parser.parse_args()
 
     env_path = args.env_file if args.env_file is not None else Path(".env")

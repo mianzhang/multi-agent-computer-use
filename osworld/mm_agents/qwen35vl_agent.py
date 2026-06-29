@@ -1150,16 +1150,27 @@ class Qwen35VLAgent:
             if isinstance(exc, type)
         )
 
+        # Managed providers behind the LiteLLM proxy (fireworks_ai, bedrock,
+        # gemini/vertex, ...) reject vllm-specific params with a 400
+        # ("does not support parameters: ['tool_choice']" / "Extra inputs are not
+        # permitted, field: 'chat_template_kwargs'" / extra_body fields). Drop
+        # those for managed models so the model runs via the standard chat path /
+        # XML fallback. Self-hosted vllm Qwen (bare model id) keeps full behavior.
+        _m = (model or "").lower()
+        is_fireworks = any(p in _m for p in ("fireworks", "bedrock", "gemini", "vertex"))
+
         extra_body: Dict = {}
-        if self.top_k is not None and self.top_k > 0:
+        if not is_fireworks and self.top_k is not None and self.top_k > 0:
             extra_body["top_k"] = self.top_k
-        if self.min_p is not None and self.min_p > 0:
+        if not is_fireworks and self.min_p is not None and self.min_p > 0:
             extra_body["min_p"] = self.min_p
-        if self.repetition_penalty is not None and self.repetition_penalty != 1.0:
+        if not is_fireworks and self.repetition_penalty is not None and self.repetition_penalty != 1.0:
             extra_body["repetition_penalty"] = self.repetition_penalty
         # Qwen3.5's chat template defaults thinking ON. Make this explicit so
         # vllm honors the per-call choice regardless of how it was launched.
-        extra_body["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
+        # (fireworks rejects chat_template_kwargs as an extra input.)
+        if not is_fireworks:
+            extra_body["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
 
         create_kwargs: Dict = dict(
             model=model,
@@ -1170,7 +1181,8 @@ class Qwen35VLAgent:
         )
         if payload.get("tools"):
             create_kwargs["tools"] = payload["tools"]
-            create_kwargs["tool_choice"] = payload.get("tool_choice", "auto")
+            if not is_fireworks:
+                create_kwargs["tool_choice"] = payload.get("tool_choice", "auto")
         if self.presence_penalty is not None and self.presence_penalty != 0.0:
             create_kwargs["presence_penalty"] = self.presence_penalty
         if extra_body:

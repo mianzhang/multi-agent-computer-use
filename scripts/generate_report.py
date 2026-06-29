@@ -2,9 +2,9 @@
 """Generate English markdown analysis reports for MACU runs.
 
 Two modes:
-  1. Single run   →  writes <run_dir>_analysis.md
+  1. Single run   →  writes reports/<run_name>_analysis.md
        python scripts/generate_report.py runs/subset36_replan5
-  2. Compare two  →  writes runs/replan_budget_comparison.md
+  2. Compare two  →  writes reports/replan_budget_comparison.md
        python scripts/generate_report.py --compare runs/subset36_replan5 runs/subset36_replan1
 
 Reuses the analysis primitives in analyze_task.py / analyze_run.py so the
@@ -23,14 +23,52 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from analyze_task import node_taxonomy, replan_effects  # noqa: E402
-from analyze_run import collect  # noqa: E402
+from analyze_run import collect, _level_map  # noqa: E402
+
+
+def _backfill_domain(recs: list, run_dir: Path) -> None:
+    """Odysseys runs have no domain; group/label by difficulty level instead.
+    Auto-detects the odysseys source file alongside the data dir."""
+    if any(r.get("domain") for r in recs):
+        return
+    here = Path(__file__).resolve().parent.parent
+    for cand in (here / "data/odysseys/odysseys45.json", here / "data/odysseys/odysseys.json"):
+        lvl = _level_map(str(cand)) if cand.exists() else {}
+        if lvl:
+            for r in recs:
+                r["domain"] = lvl.get(r["task_id"]) or "?"
+            return
 
 
 def _config_line(run_dir: Path) -> str:
     m = re.search(r"replan(\d+)", run_dir.name)
-    budget = m.group(1) if m else "?"
-    return (f"manager=claude-opus-4-6, CUA=gpt-5.4-mini, provider=apptainer, "
-            f"max_replans={budget}, 36-task stratified OSWorld subset")
+    budget = m.group(1) if m else ("0 (no-manager)" if "nomanager" in run_dir.name else "?")
+    # Read the actual config from a worker log header if present:
+    #   "manager=claude-opus-4-8  cua=gpt-5.4-mini  parallelism=4  max_steps=50  max_replans=5"
+    # Read actual config from a worker log: the graph-gen line names the manager
+    # model, the launched run_cua command names the CUA model + step cap.
+    manager, cua, max_steps = "?", "?", "?"
+    for wl in sorted(run_dir.glob("worker_*.log")):
+        try:
+            txt = wl.read_text(errors="ignore")
+        except OSError:
+            continue
+        gm = re.search(r"Graph generated[^\n]*,\s*(claude[a-z0-9.\-]+|gpt[a-z0-9.\-]+)\)", txt)
+        cua_m = re.search(r"--model (\S+)", txt)
+        steps_m = re.search(r"--max_steps (\d+)", txt)
+        if gm:
+            manager = gm.group(1)
+        if cua_m:
+            cua = cua_m.group(1)
+        if steps_m:
+            max_steps = steps_m.group(1)
+        if manager != "?" and cua != "?" and max_steps != "?":
+            break
+    if "nomanager" in run_dir.name:
+        manager = "(none — single-agent baseline)"
+    dataset = "odysseys (45-task, 15/level)" if "odysseys" in run_dir.name else "OSWorld subset"
+    return (f"manager={manager}, CUA={cua}, provider=apptainer, "
+            f"CUA max_steps={max_steps}, max_replans={budget}, {dataset}")
 
 
 def _classify_failure(rec: dict, no_traj: int, executed: int, claims_fail: bool) -> str:
@@ -56,6 +94,18 @@ _CAT_LABEL = {
     "infra_fail": "Infrastructure failure (no valid trajectory)",
 }
 _CAT_ORDER = ["success", "partial", "false_success", "agent_gaveup", "infra_fail"]
+
+
+def _fmt_score(s) -> str:
+    """Format a score without rounding a sub-1.0 partial score up to '1.00'."""
+    if not isinstance(s, (int, float)):
+        return str(s)
+    if s >= 1.0:
+        return "1.00"
+    if s <= 0:
+        return "0.00"
+    txt = f"{s:.3f}"          # 0.9961 -> '0.996', never '1.00'
+    return "0.999" if txt == "1.000" else txt
 
 
 def _count_steps(task_path: Path) -> int:
@@ -85,7 +135,8 @@ def _enrich(run_dir: Path, rec: dict) -> dict:
     rec["resp"] = " ".join(resp.split())[:90]
     rec["category"] = _classify_failure(rec, no_traj, executed, claims_fail)
     rec["no_traj"] = no_traj
-    rec["instruction"] = " ".join((fr.get("instruction") or "").split())
+    # OSWorld uses 'instruction'; odysseys/CUA web runs use 'task_text'.
+    rec["instruction"] = " ".join((fr.get("instruction") or fr.get("task_text") or "").split())
     rec["steps"] = _count_steps(task_path)
     # initial node count includes the aggregation node, to match final_nodes
     rec["initial_nodes"] = (rec.get("initial_cua") or 0) + 1
@@ -95,6 +146,7 @@ def _enrich(run_dir: Path, rec: dict) -> dict:
 def single_report(run_dir: Path) -> str:
     recs = [r for r in collect(run_dir) if r["state"] == "done"]
     recs = [_enrich(run_dir, r) for r in recs]
+    _backfill_domain(recs, run_dir)
     scored = [r for r in recs if isinstance(r["score"], (int, float))]
     succ = sum(1 for r in scored if r["score"] >= 1.0)
     n = len(recs)
@@ -126,7 +178,7 @@ def single_report(run_dir: Path) -> str:
     L.append("|---|---|---|---|---|---|---|---|")
     for r in sorted(recs, key=lambda x: (x["domain"] or "", x["task_id"])):
         ok = "✅" if (isinstance(r["score"], (int, float)) and r["score"] >= 1.0) else (
-            f"⚠️ {r['score']:.2f}" if isinstance(r["score"], (int, float)) and r["score"] > 0 else "❌")
+            f"⚠️ {_fmt_score(r['score'])}" if isinstance(r["score"], (int, float)) and r["score"] > 0 else "❌")
         instr = r["instruction"].replace("|", "\\|")
         L.append(f"| `{r['task_id'][:13]}` | {r['domain']} | {ok} | "
                  f"{r['replans_applied']} | {r['initial_nodes']} | {r['final_nodes']} | "
@@ -179,7 +231,7 @@ def single_report(run_dir: Path) -> str:
         L.append("| Domain | score | subtasks | no-traj | steps | replan | task_id | agent final response (excerpt) |")
         L.append("|---|---|---|---|---|---|---|---|")
         for r in sorted(bycat[c], key=lambda x: x["domain"]):
-            sc = f"{r['score']:.2f}" if isinstance(r["score"], (int, float)) else str(r["score"])
+            sc = _fmt_score(r["score"])
             L.append(f"| {r['domain']} | {sc} | {r['n_subtasks']} | {r['no_traj']} | "
                      f"— | {r['replans_applied']} | `{r['task_id'][:13]}` | {r['resp'][:80]} |")
 
@@ -301,14 +353,17 @@ def main() -> None:
     ap.add_argument("-o", "--output", help="Override output path")
     args = ap.parse_args()
 
+    reports_dir = Path(__file__).resolve().parent.parent / "reports"
     if args.compare:
         a, b = Path(args.compare[0]).resolve(), Path(args.compare[1]).resolve()
-        out = Path(args.output) if args.output else a.parent / "replan_budget_comparison.md"
+        out = Path(args.output) if args.output else reports_dir / "replan_budget_comparison.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(compare_report(a, b), encoding="utf-8")
         print(f"wrote {out}")
     elif args.run_dir:
         rd = Path(args.run_dir).resolve()
-        out = Path(args.output) if args.output else rd.parent / f"{rd.name}_analysis.md"
+        out = Path(args.output) if args.output else reports_dir / f"{rd.name}_analysis.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(single_report(rd), encoding="utf-8")
         print(f"wrote {out}")
     else:

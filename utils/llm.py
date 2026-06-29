@@ -31,15 +31,20 @@ TOKENS_PER_MILLION = 1_000_000
 # Rates per 1M tokens (USD). Qwen / vllm-served models are intentionally
 # absent — local inference, no API charge — so compute_cost returns $0.00.
 MODEL_RATES = {
+    "gpt-5.4-nano": {"input": 0.2, "output": 1.25},
     "gpt-5.4-mini": {"input": 0.75, "output": 4.5},
     "gpt-5.4": {"input": 2.5, "output": 15.0},
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
     "claude-opus-4-6": {"input": 5.0, "output": 25.0},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+    "claude-opus-4-8": {"input": 5.0, "output": 25.0},
     "claude-opus-4-20250514": {"input": 5.0, "output": 25.0},
     "gemini-3.1-pro-preview": {"input": 2.0, "output": 12.0},
     "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.5},
+    "bedrock/qwen.qwen3-vl-235b-a22b": {"input": 0.53, "output": 2.66},
+    "fireworks_ai/qwen3p7-plus": {"input": 0.4, "output": 1.6},
+    "fireworks_ai/deployed/t5cvm6h4": {"input": 0.0, "output": 0.0},  # Qwen3.6-27B (deployed)
 }
 
 def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -256,7 +261,17 @@ def call_openai(
         create_kwargs["temperature"] = temperature
 
     inference_started_at = time.time()
-    response = client.chat.completions.create(**create_kwargs)
+    try:
+        response = client.chat.completions.create(**create_kwargs)
+    except Exception as exc:  # noqa: BLE001
+        # Some newer models (e.g. claude-opus-4-8) deprecate `temperature` and
+        # reject it with a 400. Retry once without it rather than failing.
+        msg = str(exc).lower()
+        if "temperature" in msg and "temperature" in create_kwargs:
+            create_kwargs.pop("temperature", None)
+            response = client.chat.completions.create(**create_kwargs)
+        else:
+            raise
     inference_ended_at = time.time()
     usage = response.usage
     input_tokens = usage.prompt_tokens if usage else 0
